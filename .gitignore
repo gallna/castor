@@ -1,0 +1,13 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Speech models: large binaries, downloaded separately (see README "Models")
+models/
+
+# Editor
+*.code-workspace
+.vscode/
+.idea/
