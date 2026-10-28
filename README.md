@@ -33,12 +33,28 @@ python -m castor --lang pl --transcript rozmowa.txt
 python -m castor --system-prompt interviewer.txt --initial-prompt "Start the interview."
 ```
 
-| Action             | English          | Polish          | Keyboard fallback      |
-|--------------------|------------------|-----------------|------------------------|
-| Send your turn (all sentences) | "... over" | "... odbiór" | Enter          |
-| Send only the last sentence | "... send last" | "... wyślij ostatnie" | `l` + Enter |
-| End conversation   | "... over and out" | "... bez odbioru" | `q` + Enter        |
-| Fix misheard words | –                | –               | type text + Enter (appended to what was heard) |
+You can speak and type in the same turn. A line typed and confirmed with Enter is
+added to what Whisper heard, in the order it happened, so you can fix a misheard
+word or type something hard to say. Typing works while Gemini is speaking too: the
+lines you type go into your next turn.
+
+| Action | Say (English) | Say (Polish) | Keyboard |
+|---|---|---|---|
+| Add a typed line | – | – | Enter |
+| Send everything heard and typed | "... over" | "... odbiór" | Ctrl+Enter |
+| Send only the last line | "... send last" | "... wyślij ostatnie" | Ctrl+Alt+Enter |
+| Send, then end the conversation | "... over and out" | "... bez odbioru" | F10 (or Ctrl+D) |
+
+Text still in the input line is sent along with Ctrl+Enter / F10. Ctrl+C quits
+immediately without sending.
+
+Most terminals send the same thing for Enter and Ctrl+Enter. Castor asks the
+terminal for an extended key mode, which kitty, foot, WezTerm, Ghostty,
+Alacritty, iTerm2 and xterm support. Where that isn't available, use these
+instead: **Enter on an empty line** sends everything, and **Alt+Enter** sends the
+last line (Ctrl+Alt+Enter arrives as Alt+Enter there anyway). GNOME Terminal
+opens its menu on F10 unless that is turned off in its preferences, so use Ctrl+D
+there.
 
 Speech is cut into phrases at pauses (~0.75 s) and each phrase is transcribed by
 Whisper, so a phrase appears about 1–2 s after you stop talking (CPU, `small` model).
@@ -76,7 +92,8 @@ Paths are set in `castor/config.py`.
 
 ```
 castor/
-  main.py          command line, wiring, keyboard reader
+  main.py          command line, wiring
+  keyboard.py      typed input line and key shortcuts
   conversation.py  turn-taking loop (speak → listen → send)
   keywords.py      "over" / "over and out" detection
   gemini_chat.py   one Gemini chat session = whole conversation context

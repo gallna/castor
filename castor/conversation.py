@@ -2,8 +2,12 @@
 
 Speech and keyboard input arrive as events on a single queue:
   (PHRASE, text)     - a finished phrase recognised by the microphone
-  (KEY, line)        - a line typed on the keyboard (fallback when STT misbehaves)
+  (TYPED, line)      - a line typed and confirmed with Enter; merged with the speech
+  (SEND_ALL, text)   - keyboard: send everything heard and typed
+  (SEND_LAST, text)  - keyboard: send only the last line
+  (QUIT, text)       - keyboard: send what was heard and typed, then finish
   (MIC_ERROR, msg)   - the microphone stopped unexpectedly
+The keyboard commands carry the text still in the input line, which comes last.
 """
 
 import queue
@@ -14,11 +18,13 @@ from castor.config import LanguageProfile
 from castor.keywords import Signal, match_keyword
 
 PHRASE = "phrase"
-KEY = "key"
+TYPED = "typed"
+SEND_ALL = "send_all"
+SEND_LAST = "send_last"
+QUIT = "quit"
 MIC_ERROR = "mic_error"
 
-QUIT_COMMANDS = frozenset({"q", "quit", "exit"})
-LAST_COMMANDS = frozenset({"l", "last"})
+COMMANDS = frozenset({SEND_ALL, SEND_LAST, QUIT})
 
 Event = tuple[str, str]
 Sink = Callable[[Event], None]
@@ -62,13 +68,10 @@ def _last_sentence(heard: tuple[str, ...]) -> str:
     return sentences[-1] if sentences else ""
 
 
-def _keyboard_turn(heard: tuple[str, ...], line: str) -> UserTurn:
-    typed = line.strip()
-    if typed.lower() in QUIT_COMMANDS:
-        return UserTurn(_join(heard), ends_conversation=True, by_keyboard=True)
-    if typed.lower() in LAST_COMMANDS:
+def _keyboard_turn(heard: tuple[str, ...], command: str) -> UserTurn:
+    if command == SEND_LAST:
         return UserTurn(_last_sentence(heard), ends_conversation=False, by_keyboard=True)
-    return UserTurn(_join((*heard, typed)), ends_conversation=False, by_keyboard=True)
+    return UserTurn(_join(heard), ends_conversation=command == QUIT, by_keyboard=True)
 
 
 def collect_turn(
@@ -77,15 +80,21 @@ def collect_turn(
     show: Show,
     flush: Callable[[], str] = lambda: "",
 ) -> UserTurn:
-    """Gather the user's phrases until a keyword, Enter or "q" ends the turn."""
+    """Gather spoken phrases and typed lines until a keyword or keyboard command ends the turn."""
     heard: tuple[str, ...] = ()
     while True:
         kind, payload = events.get()
         if kind == MIC_ERROR:
             raise MicrophoneError(payload)
-        if kind == KEY:
+        if kind in COMMANDS:
             leftover = flush()  # stops the mic, so no more phrases arrive after this
-            return _keyboard_turn((*heard, *_pending_phrases(events), leftover), payload)
+            pending = _pending_lines(events)
+            return _keyboard_turn((*heard, *pending, leftover, payload.strip()), kind)
+        if kind == TYPED:
+            if payload.strip():
+                show(f"  ✎ {payload.strip()}")
+                heard = (*heard, payload.strip())
+            continue
 
         match = match_keyword(
             payload, profile.turn_keywords, profile.end_keywords, profile.last_keywords
@@ -112,14 +121,20 @@ def _drain(events: "queue.Queue[Event]") -> tuple[Event, ...]:
             return drained
 
 
-def _pending_phrases(events: "queue.Queue[Event]") -> tuple[str, ...]:
-    """Phrases the mic finalised while Enter was being handled; other events are dropped."""
-    return tuple(payload for kind, payload in _drain(events) if kind == PHRASE)
+def _pending_lines(events: "queue.Queue[Event]") -> tuple[str, ...]:
+    """Phrases and typed lines that arrived while a command was handled; others are dropped."""
+    return tuple(payload.strip() for kind, payload in _drain(events) if kind in (PHRASE, TYPED))
 
 
-def _discard_pending(events: "queue.Queue[Event]") -> None:
-    """Drop keys pressed while Gemini was speaking, so they don't end the next turn."""
-    _drain(events)
+def _discard_commands(events: "queue.Queue[Event]") -> None:
+    """Drop commands given while Gemini was speaking, so they don't end the next turn.
+
+    Lines typed meanwhile, including the text a dropped command carried, are kept
+    for the next turn.
+    """
+    for kind, payload in _drain(events):
+        if kind in (TYPED, *COMMANDS) and payload.strip():
+            events.put((TYPED, payload))
 
 
 def _listen_for_turn(
@@ -132,10 +147,11 @@ def _listen_for_turn(
         f"Listening — say “{profile.turn_keywords[0]}” to send all, "
         f"“{profile.last_keywords[0]}” to send only the last sentence, "
         f"“{profile.end_keywords[0]}” to finish\n"
-        "  (keyboard: Enter = send all, l + Enter = send last, q + Enter = quit)"
+        "  (or type: Enter = add line, Ctrl+Enter = send all, "
+        "Ctrl+Alt+Enter = send last, F10 = quit)"
     )
     while True:
-        _discard_pending(events)
+        _discard_commands(events)
         show(hint)
         microphone.start(events.put)
         try:

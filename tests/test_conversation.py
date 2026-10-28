@@ -4,9 +4,12 @@ import pytest
 
 from castor.config import LANGUAGES
 from castor.conversation import (
-    KEY,
     MIC_ERROR,
     PHRASE,
+    QUIT,
+    SEND_ALL,
+    SEND_LAST,
+    TYPED,
     MicrophoneError,
     collect_turn,
     run_conversation,
@@ -49,8 +52,8 @@ def test_collect_turn_end_keyword_finishes_conversation():
     assert turn.ends_conversation
 
 
-def test_enter_ends_turn_with_what_was_heard():
-    events = events_of((PHRASE, "something misheard"), (KEY, ""))
+def test_send_all_ends_turn_with_what_was_heard():
+    events = events_of((PHRASE, "something misheard"), (SEND_ALL, ""))
 
     turn = collect_turn(events, EN, show=lambda _: None)
 
@@ -59,16 +62,41 @@ def test_enter_ends_turn_with_what_was_heard():
     assert not turn.ends_conversation
 
 
-def test_typed_text_is_added_to_turn():
-    events = events_of((PHRASE, "hello"), (KEY, "typed correction"))
+def test_typed_lines_are_merged_with_speech_in_order():
+    events = events_of((PHRASE, "hello"), (TYPED, "typed correction"), (PHRASE, "more over"))
 
     turn = collect_turn(events, EN, show=lambda _: None)
 
-    assert turn.text == "hello typed correction"
+    assert turn.text == "hello typed correction more"
+    assert not turn.by_keyboard
 
 
-def test_phrases_finalised_while_stopping_after_enter_are_kept():
-    events = events_of((PHRASE, "first"), (KEY, ""))
+def test_text_still_in_the_input_line_is_sent_last():
+    events = events_of((PHRASE, "hello"), (SEND_ALL, "world"))
+
+    turn = collect_turn(events, EN, show=lambda _: None, flush=lambda: "there")
+
+    assert turn.text == "hello there world"
+
+
+def test_typed_line_counts_as_something_said_for_bare_keyword():
+    events = events_of((TYPED, "a typed question"), (PHRASE, "over"))
+
+    turn = collect_turn(events, EN, show=lambda _: None)
+
+    assert turn.text == "a typed question"
+
+
+def test_typed_text_is_not_checked_for_keywords():
+    events = events_of((TYPED, "game over"), (SEND_ALL, ""))
+
+    turn = collect_turn(events, EN, show=lambda _: None)
+
+    assert turn.text == "game over"
+
+
+def test_phrases_finalised_while_stopping_after_send_are_kept():
+    events = events_of((PHRASE, "first"), (SEND_ALL, "typed"))
 
     def flush():
         events.put((PHRASE, "late words"))  # queued by the mic thread during stop()
@@ -76,11 +104,11 @@ def test_phrases_finalised_while_stopping_after_enter_are_kept():
 
     turn = collect_turn(events, EN, show=lambda _: None, flush=flush)
 
-    assert turn.text == "first late words tail"
+    assert turn.text == "first late words tail typed"
 
 
-def test_q_on_keyboard_ends_conversation():
-    events = events_of((PHRASE, "bye"), (KEY, " q "))
+def test_quit_on_keyboard_ends_conversation():
+    events = events_of((PHRASE, "bye"), (QUIT, ""))
 
     turn = collect_turn(events, EN, show=lambda _: None)
 
@@ -187,15 +215,15 @@ def test_last_words_before_end_keyword_are_sent_and_answered():
 
 
 def test_unfinished_words_are_kept_when_turn_ends_by_keyboard():
-    mic = FakeMicrophone([[(PHRASE, "hello"), (KEY, "")], [(KEY, "q")]], leftovers=["there"])
+    mic = FakeMicrophone([[(PHRASE, "hello"), (SEND_ALL, "")], [(QUIT, "")]], leftovers=["there"])
 
     chat, _, _ = run(mic)
 
     assert chat.sent == ["start", "hello there"]
 
 
-def test_words_said_before_q_are_sent_as_last_message():
-    mic = FakeMicrophone([[(KEY, "q")]], leftovers=["goodbye"])
+def test_words_said_before_quit_are_sent_as_last_message():
+    mic = FakeMicrophone([[(QUIT, "")]], leftovers=["goodbye"])
 
     chat, speaker, _ = run(mic)
 
@@ -203,17 +231,45 @@ def test_words_said_before_q_are_sent_as_last_message():
     assert speaker.said == ["reply 1", "reply 2"]
 
 
-def test_keys_pressed_while_gemini_speaks_are_discarded():
-    mic = FakeMicrophone([[(PHRASE, "real question over")], [(KEY, "q")]])
+def test_commands_pressed_while_gemini_speaks_are_discarded():
+    mic = FakeMicrophone([[(PHRASE, "real question over")], [(QUIT, "")]])
 
     class StaleKeySpeaker(FakeSpeaker):
         def say(self, text):
             super().say(text)
-            mic.events.put((KEY, "q"))
+            mic.events.put((QUIT, ""))
 
     chat, _, _ = run(mic, speaker=StaleKeySpeaker())
 
     assert chat.sent == ["start", "real question"]
+
+
+def test_unsent_text_of_a_command_given_while_gemini_speaks_is_kept():
+    mic = FakeMicrophone([[(SEND_ALL, "")], [(QUIT, "")]])
+
+    class TypingSpeaker(FakeSpeaker):
+        def say(self, text):
+            super().say(text)
+            if len(self.said) == 1:
+                mic.events.put((SEND_ALL, "typed too early"))
+
+    chat, _, _ = run(mic, speaker=TypingSpeaker())
+
+    assert chat.sent[1] == "typed too early"
+
+
+def test_lines_typed_while_gemini_speaks_go_into_the_next_turn():
+    mic = FakeMicrophone([[(PHRASE, "and spoken over")], [(QUIT, "")]])
+
+    class TypingSpeaker(FakeSpeaker):
+        def say(self, text):
+            super().say(text)
+            if len(self.said) == 1:
+                mic.events.put((TYPED, "typed early"))
+
+    chat, _, _ = run(mic, speaker=TypingSpeaker())
+
+    assert chat.sent[1] == "typed early and spoken"
 
 
 def test_messages_are_reported_as_they_happen_so_a_crash_keeps_them():
@@ -281,8 +337,8 @@ def test_bare_send_last_with_nothing_said_keeps_listening():
     assert turn.text == "question"
 
 
-def test_l_on_keyboard_sends_only_the_last_sentence():
-    events = events_of((PHRASE, "first"), (PHRASE, "second"), (KEY, " l "))
+def test_send_last_on_keyboard_sends_only_the_last_sentence():
+    events = events_of((PHRASE, "first"), (PHRASE, "second"), (SEND_LAST, ""))
 
     turn = collect_turn(events, EN, show=lambda _: None)
 
@@ -291,9 +347,17 @@ def test_l_on_keyboard_sends_only_the_last_sentence():
     assert not turn.ends_conversation
 
 
-def test_l_on_keyboard_counts_words_still_being_recognised_as_last_sentence():
-    events = events_of((PHRASE, "first"), (KEY, "l"))
+def test_send_last_counts_words_still_being_recognised_as_last_sentence():
+    events = events_of((PHRASE, "first"), (SEND_LAST, ""))
 
     turn = collect_turn(events, EN, show=lambda _: None, flush=lambda: "unfinished")
 
     assert turn.text == "unfinished"
+
+
+def test_send_last_with_text_in_the_input_line_sends_that_text():
+    events = events_of((PHRASE, "first"), (SEND_LAST, "typed instead"))
+
+    turn = collect_turn(events, EN, show=lambda _: None, flush=lambda: "unfinished")
+
+    assert turn.text == "typed instead"

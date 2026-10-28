@@ -5,7 +5,6 @@ import os
 import queue
 import shlex
 import sys
-import threading
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -16,7 +15,8 @@ from castor.config import (
     LANGUAGES,
     WHISPER_DIR,
 )
-from castor.conversation import KEY, MicrophoneError, Sink, run_conversation
+from castor.conversation import MicrophoneError, run_conversation
+from castor.keyboard import typed_input
 
 
 def parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
@@ -64,14 +64,6 @@ def parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 def _fail(message: str) -> int:
     print(f"Error: {message}", file=sys.stderr)
     return 2
-
-
-def start_keyboard_reader(sink: Sink) -> None:
-    def read_lines() -> None:
-        for line in sys.stdin:
-            sink((KEY, line.rstrip("\n")))
-
-    threading.Thread(target=read_lines, daemon=True, name="keyboard").start()
 
 
 def transcript_writer(path: Path) -> Callable[[str, str], None]:
@@ -134,18 +126,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     chat = GeminiChat(api_key, args.model, system_prompt)
 
     events: queue.Queue = queue.Queue()
-    start_keyboard_reader(events.put)
     try:
-        run_conversation(
-            chat=chat,
-            speaker=speaker,
-            microphone=microphone,
-            events=events,
-            profile=profile,
-            initial_prompt=initial_prompt,
-            show=print,
-            on_message=transcript_writer(args.transcript) if args.transcript else lambda role, text: None,
-        )
+        with typed_input(events.put):
+            run_conversation(
+                chat=chat,
+                speaker=speaker,
+                microphone=microphone,
+                events=events,
+                profile=profile,
+                initial_prompt=initial_prompt,
+                show=print,
+                on_message=transcript_writer(args.transcript) if args.transcript else lambda role, text: None,
+            )
     except KeyboardInterrupt:
         print("\nInterrupted.")
         return 130

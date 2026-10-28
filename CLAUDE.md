@@ -18,7 +18,8 @@ Python 3.10, venv in `.venv/`, pinned deps in `requirements.txt`. `models/` is g
 ## Architecture
 
 Everything meets in one `queue.Queue` of `(kind, payload)` events (`castor/conversation.py`):
-`PHRASE` from the microphone, `KEY` from the stdin thread, `MIC_ERROR` from mic threads.
+`PHRASE` from the microphone; `TYPED`, `SEND_ALL`, `SEND_LAST`, `QUIT` from the keyboard
+(commands carry the unsent input-line text); `MIC_ERROR` from mic threads.
 `run_conversation` is a plain loop: speak reply → open mic → `collect_turn` → close mic → send.
 
 - `conversation.py` – turn loop; depends only on the `ChatSession`/`Speaker`/`Microphone`
@@ -27,6 +28,10 @@ Everything meets in one `queue.Queue` of `(kind, payload)` events (`castor/conve
   thread → `PHRASE` events. `stop()` is idempotent, delivers already-cut phrases to the sink,
   then returns the transcript of the unfinished phrase.
 - `segmenter.py` – energy-based endpointing with an adaptive noise floor; cuts at ~0.75 s pauses.
+- `keyboard.py` – prompt_toolkit input line on its own thread, under `patch_stdout` so prints
+  appear above it. Ctrl+Enter etc. need kitty/modifyOtherKeys sequences, registered in
+  prompt_toolkit's `ANSI_SEQUENCES`; empty Enter and Alt+Enter are the fallbacks. Ctrl+C sends
+  SIGINT to the process. Piped stdin falls back to line commands (`line_event`).
 - `keywords.py` – keyword only counts at the end of a phrase; diacritics/punctuation ignored.
 - `config.py` – per-language `LanguageProfile` (keywords, Piper voice, default system prompt).
 - `main.py` – CLI and wiring; heavy imports (Whisper, Piper, Gemini SDK) happen after arg checks.
@@ -37,6 +42,8 @@ Everything meets in one `queue.Queue` of `(kind, payload)` events (`castor/conve
 - Only one thread at a time may call the Whisper model; `stop()` abandons a stuck transcriber
   rather than running the model concurrently.
 - Spoken keywords are passed to Whisper as `hotwords`; without them "odbiór" is often misheard.
+- Typed text is never checked for keywords; only spoken phrases are.
+- Commands given while Gemini speaks are dropped; typed lines are kept for the next turn.
 - Gemini replies are spoken, so `speakable.py` strips markdown before TTS.
 
 ## Models (`models/`, not code)
